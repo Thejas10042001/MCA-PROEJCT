@@ -1,0 +1,523 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Brush } from 'recharts';
+import type { CognitiveDataPoint, Notification } from '../types';
+import { DownloadIcon } from './icons/DownloadIcon';
+import { ExclamationIcon } from './icons/ExclamationIcon';
+import { XIcon } from './icons/XIcon';
+import { CognitiveModel } from './cognitiveModel';
+import { LightBulbIcon } from './icons/LightBulbIcon';
+import { BellIcon } from './icons/BellIcon';
+
+const MAX_DATA_POINTS = 30;
+const HIGH_STRESS_THRESHOLD = 85;
+const STRESS_ALERT_DURATION_COUNT = 3; // Number of consecutive data points to trigger alert
+const STRESS_SPIKE_THRESHOLD = 30; // Increase over the window
+const STRESS_SPIKE_WINDOW = 3; // Number of data points for spike detection
+const STRESS_RECOVERY_THRESHOLD = 70; // Stress must drop below this to clear an alert
+const ATTENTION_DROP_THRESHOLD = 35; // Drop from recent average
+const RECENT_ATTENTION_WINDOW = 5; // Number of data points for average
+const ATTENTION_RECOVERY_FACTOR = 0.5; // Attention must recover above (avg - threshold * factor) to dismiss alert
+const LOW_ATTENTION_THRESHOLD = 35;
+const LOW_ATTENTION_DURATION_COUNT = 4;
+const LOW_ATTENTION_RECOVERY_THRESHOLD = 40;
+const LOW_CURIOSITY_THRESHOLD = 40;
+const LOW_CURIOSITY_DURATION_COUNT = 5;
+const LOW_CURIOSITY_RECOVERY_THRESHOLD = 45;
+
+
+interface SummaryState {
+    text: string;
+    color: string;
+}
+
+const getCognitiveSummary = (point: CognitiveDataPoint): SummaryState => {
+    const { attention, stress, curiosity } = point;
+
+    if (attention > 75 && stress > 65) {
+        return { text: "Cognitive Load", color: "text-amber-400" };
+    }
+    if (attention > 80 && stress < 30) {
+        return { text: "Flow State", color: "text-cyan-300" };
+    }
+    if (curiosity > 70 && attention > 60) {
+        return { text: "Engaged & Curious", color: "text-violet-400" };
+    }
+    if (stress > 70 && attention < 40) {
+        return { text: "Stressed & Distracted", color: "text-rose-500" };
+    }
+    if (attention < 30) {
+        return { text: "Attention Waning", color: "text-yellow-500" };
+    }
+    if (stress > 60) {
+        return { text: "High Stress", color: "text-red-500" };
+    }
+    if (curiosity > 75) {
+        return { text: "High Curiosity", color: "text-purple-400" };
+    }
+    return { text: "Nominal Engagement", color: "text-gray-300" };
+};
+
+const getPersonalizedSuggestion = (summaryText: string): string => {
+    switch (summaryText) {
+        case "Cognitive Load":
+            return "Consider a 2-minute mindfulness exercise to reset your focus.";
+        case "Flow State":
+            return "You're in the zone! Minimize distractions to maintain this high-performance state.";
+        case "Attention Waning":
+            return "Try the Pomodoro Technique: 25 minutes of focused work followed by a 5-minute break.";
+        case "Stressed & Distracted":
+            return "Step away for a moment. A short walk can help clear your mind and reduce stress.";
+        case "High Stress":
+            return "Your stress levels are high. It's a good time for a short break or some deep breathing exercises.";
+        default:
+            return "Stay engaged and monitor your cognitive state for optimal performance.";
+    }
+}
+
+
+const CognitiveChart: React.FC<{ data: CognitiveDataPoint[], dataKey: keyof CognitiveDataPoint, color: string, name: string }> = ({ data, dataKey, color, name }) => (
+    <div className="w-full h-56 md:h-64">
+        <h3 className="text-lg font-semibold mb-2 text-center text-gray-300">{name}</h3>
+        <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data} margin={{ top: 5, right: 20, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#4A5568" />
+                <XAxis dataKey="time" tick={{ fill: '#A0AEC0' }} tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString()} hide={true} />
+                <YAxis domain={[0, 100]} tick={{ fill: '#A0AEC0' }} axisLine={false} tickLine={false} />
+                <Tooltip
+                    contentStyle={{
+                        backgroundColor: 'rgba(26, 32, 44, 0.8)',
+                        borderColor: '#4A5568',
+                        color: '#E2E8F0',
+                    }}
+                    labelFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                    formatter={(value: number) => value.toFixed(1)}
+                />
+                 <Legend verticalAlign="top" height={36}/>
+                <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} activeDot={{ r: 6 }} isAnimationActive={false}/>
+                <Brush 
+                    dataKey="time" 
+                    height={25} 
+                    stroke={color} 
+                    fill="rgba(100, 116, 139, 0.2)" 
+                    travellerWidth={10}
+                    tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                >
+                    <LineChart>
+                        <Line type="monotone" dataKey={dataKey} stroke={color} dot={false} />
+                    </LineChart>
+                </Brush>
+            </LineChart>
+        </ResponsiveContainer>
+    </div>
+);
+
+const getIntensityColor = (type: Notification['type'], intensity: number): string => {
+    if (type === 'stress') {
+        if (intensity > 0.7) return 'bg-red-500';
+        if (intensity > 0.4) return 'bg-orange-500';
+        return 'bg-amber-500';
+    }
+    if (type === 'attention-drop' || type === 'low-attention') {
+        if (intensity > 0.7) return 'bg-orange-400';
+        if (intensity > 0.4) return 'bg-yellow-400';
+        return 'bg-sky-400';
+    }
+    if (type === 'low-curiosity') {
+        if (intensity > 0.7) return 'bg-fuchsia-500';
+        if (intensity > 0.4) return 'bg-purple-500';
+        return 'bg-violet-400';
+    }
+    return 'bg-gray-500';
+};
+
+const Dashboard: React.FC = () => {
+    const [data, setData] = useState<CognitiveDataPoint[]>([]);
+    const [cameraError, setCameraError] = useState<string | null>(null);
+    
+    // State for the actual cognitive values
+    const [cognitiveSummary, setCognitiveSummary] = useState<SummaryState>({ text: 'Analyzing...', color: 'text-gray-400' });
+    const [suggestion, setSuggestion] = useState<string>('');
+    
+    // State for what is displayed, to allow for transitions
+    const [displayedCognitiveSummary, setDisplayedCognitiveSummary] = useState(cognitiveSummary);
+    const [displayedSuggestion, setDisplayedSuggestion] = useState(suggestion);
+    const [isFading, setIsFading] = useState(false);
+
+    const [notifications, setNotifications] = useState<Notification[]>([]);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const lastInteractionTimeRef = useRef<number>(Date.now());
+    const highStressCounter = useRef(0);
+    const lowAttentionCounter = useRef(0);
+    const lowCuriosityCounter = useRef(0);
+    const highStressAlertActive = useRef(false);
+    const attentionDropAlertActive = useRef(false);
+    const lowAttentionAlertActive = useRef(false);
+    const lowCuriosityAlertActive = useRef(false);
+    const modelRef = useRef(new CognitiveModel());
+    const attentionHistoryRef = useRef<number[]>([]);
+    const stressHistoryRef = useRef<number[]>([]);
+
+    const initializeCamera = useCallback(async () => {
+        try {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                }
+            } else {
+                setCameraError("Camera access not supported by your browser.");
+            }
+        } catch (err) {
+            console.error("Error accessing camera:", err);
+            setCameraError("Camera access denied. Please enable camera permissions for this site.");
+        }
+    }, []);
+    
+    useEffect(() => {
+        initializeCamera();
+    }, [initializeCamera]);
+
+    useEffect(() => {
+        const handleInteraction = () => {
+          lastInteractionTimeRef.current = Date.now();
+        };
+    
+        window.addEventListener('mousemove', handleInteraction);
+        window.addEventListener('click', handleInteraction);
+    
+        return () => {
+          window.removeEventListener('mousemove', handleInteraction);
+          window.removeEventListener('click', handleInteraction);
+        };
+      }, []);
+
+    const addNotification = useCallback((notification: Omit<Notification, 'id'>) => {
+        setNotifications(currentNotifications => {
+            if (currentNotifications.some(n => n.type === notification.type)) {
+                return currentNotifications;
+            }
+            return [...currentNotifications, { ...notification, id: Date.now() }];
+        });
+    }, []);
+
+    const handleDismissNotification = useCallback((id: number) => {
+        setNotifications(currentNotifications =>
+            currentNotifications.filter(n => n.id !== id)
+        );
+    }, []);
+
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const interactionLevel = Date.now() - lastInteractionTimeRef.current < 1500 ? Math.random() * 0.5 + 0.3 : 0;
+            const simulatedGazeFocus = interactionLevel > 0 ? Math.random() * 0.3 + 0.7 : Math.random() * 0.4 + 0.2;
+            
+            let simulatedValence: 'positive' | 'negative' | 'neutral' = 'neutral';
+            const valenceRoll = Math.random();
+            if (valenceRoll < 0.05) simulatedValence = 'negative';
+            else if (valenceRoll < 0.1) simulatedValence = 'positive';
+
+            const newPoint = modelRef.current.update({
+                interactionLevel,
+                simulatedGazeFocus,
+                simulatedValence,
+            });
+
+            setData(currentData => {
+                const newSummary = getCognitiveSummary(newPoint);
+                setCognitiveSummary(newSummary);
+                
+                // --- Stress Logic ---
+                const stressHistory = stressHistoryRef.current;
+                stressHistory.push(newPoint.stress);
+                if (stressHistory.length > STRESS_SPIKE_WINDOW) {
+                    stressHistory.shift();
+                }
+
+                if (newPoint.stress < STRESS_RECOVERY_THRESHOLD && highStressAlertActive.current) {
+                    setNotifications(curr => curr.filter(n => n.type !== 'stress'));
+                    highStressAlertActive.current = false;
+                    highStressCounter.current = 0;
+                }
+
+                if (stressHistory.length === STRESS_SPIKE_WINDOW && !highStressAlertActive.current) {
+                    const stressIncrease = newPoint.stress - stressHistory[0];
+                    if (stressIncrease >= STRESS_SPIKE_THRESHOLD) {
+                        const intensity = Math.max(0, Math.min(1, (stressIncrease - STRESS_SPIKE_THRESHOLD) / STRESS_SPIKE_THRESHOLD));
+                        addNotification({
+                            type: 'stress',
+                            title: 'Rapid Stress Spike',
+                            message: 'A sudden increase in stress was detected.',
+                            intensity: intensity,
+                        });
+                        highStressAlertActive.current = true;
+                        highStressCounter.current = 0;
+                    }
+                }
+                
+                if (newPoint.stress > HIGH_STRESS_THRESHOLD) {
+                    highStressCounter.current += 1;
+                } else {
+                    highStressCounter.current = 0;
+                }
+
+                if (highStressCounter.current >= STRESS_ALERT_DURATION_COUNT && !highStressAlertActive.current) {
+                    const intensity = Math.max(0, Math.min(1, (newPoint.stress - HIGH_STRESS_THRESHOLD) / (100 - HIGH_STRESS_THRESHOLD)));
+                    addNotification({
+                        type: 'stress',
+                        title: 'High Stress Detected',
+                        message: 'Consider taking a short break to refocus.',
+                        intensity: intensity,
+                    });
+                    highStressAlertActive.current = true;
+                }
+
+                // --- Attention Logic ---
+                const attentionHistory = attentionHistoryRef.current;
+                
+                // Recovery from Attention Drop
+                if (attentionDropAlertActive.current) {
+                    const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
+                    if (newPoint.attention > averageAttention - (ATTENTION_DROP_THRESHOLD * ATTENTION_RECOVERY_FACTOR)) {
+                       setNotifications(curr => curr.filter(n => n.type !== 'attention-drop'));
+                       attentionDropAlertActive.current = false;
+                    }
+                }
+
+                // Attention Drop Detection
+                if (attentionHistory.length >= RECENT_ATTENTION_WINDOW && !attentionDropAlertActive.current) {
+                    const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
+                    const attentionDrop = averageAttention - newPoint.attention;
+                    if (attentionDrop > ATTENTION_DROP_THRESHOLD) {
+                        const intensity = Math.max(0, Math.min(1, (attentionDrop - ATTENTION_DROP_THRESHOLD) / (100 - ATTENTION_DROP_THRESHOLD)));
+                        addNotification({
+                            type: 'attention-drop',
+                            title: 'Sudden Drop in Attention',
+                            message: 'A significant distraction may have occurred.',
+                            intensity: intensity,
+                        });
+                        attentionDropAlertActive.current = true;
+                    }
+                }
+
+                // Recovery from Low Attention
+                if (newPoint.attention > LOW_ATTENTION_RECOVERY_THRESHOLD && lowAttentionAlertActive.current) {
+                    setNotifications(curr => curr.filter(n => n.type !== 'low-attention'));
+                    lowAttentionAlertActive.current = false;
+                    lowAttentionCounter.current = 0;
+                }
+
+                // Sustained Low Attention Detection
+                if (newPoint.attention < LOW_ATTENTION_THRESHOLD) {
+                    lowAttentionCounter.current += 1;
+                } else {
+                    lowAttentionCounter.current = 0;
+                }
+                
+                if (lowAttentionCounter.current >= LOW_ATTENTION_DURATION_COUNT && !lowAttentionAlertActive.current) {
+                    const intensity = Math.max(0, Math.min(1, (LOW_ATTENTION_THRESHOLD - newPoint.attention) / LOW_ATTENTION_THRESHOLD));
+                     addNotification({
+                        type: 'low-attention',
+                        title: 'Low Attention Span',
+                        message: 'Focus appears to be consistently low.',
+                        intensity: intensity,
+                    });
+                    lowAttentionAlertActive.current = true;
+                }
+
+                // --- Curiosity Logic ---
+                if (newPoint.curiosity > LOW_CURIOSITY_RECOVERY_THRESHOLD && lowCuriosityAlertActive.current) {
+                    setNotifications(curr => curr.filter(n => n.type !== 'low-curiosity'));
+                    lowCuriosityAlertActive.current = false;
+                    lowCuriosityCounter.current = 0;
+                }
+
+                if (newPoint.curiosity < LOW_CURIOSITY_THRESHOLD) {
+                    lowCuriosityCounter.current += 1;
+                } else {
+                    lowCuriosityCounter.current = 0;
+                }
+
+                if (lowCuriosityCounter.current >= LOW_CURIOSITY_DURATION_COUNT && !lowCuriosityAlertActive.current) {
+                    const intensity = Math.max(0, Math.min(1, (LOW_CURIOSITY_THRESHOLD - newPoint.curiosity) / LOW_CURIOSITY_THRESHOLD));
+                     addNotification({
+                        type: 'low-curiosity',
+                        title: 'Low Curiosity',
+                        message: 'Interest appears to be waning. A new topic might help.',
+                        intensity: intensity,
+                    });
+                    lowCuriosityAlertActive.current = true;
+                }
+
+                // Update history
+                attentionHistoryRef.current.push(newPoint.attention);
+                if (attentionHistoryRef.current.length > RECENT_ATTENTION_WINDOW) {
+                    attentionHistoryRef.current.shift();
+                }
+                
+                const newData = [...currentData, newPoint];
+                if (newData.length > MAX_DATA_POINTS) {
+                    return newData.slice(newData.length - MAX_DATA_POINTS);
+                }
+                return newData;
+            });
+        }, 1500);
+
+        return () => clearInterval(interval);
+    }, [addNotification]);
+    
+    useEffect(() => {
+        setSuggestion(getPersonalizedSuggestion(cognitiveSummary.text));
+    }, [cognitiveSummary]);
+
+    useEffect(() => {
+        if (cognitiveSummary.text !== displayedCognitiveSummary.text) {
+            setIsFading(true);
+            const timer = setTimeout(() => {
+                setDisplayedCognitiveSummary(cognitiveSummary);
+                setDisplayedSuggestion(suggestion);
+                setIsFading(false);
+            }, 200);
+            return () => clearTimeout(timer);
+        }
+    }, [cognitiveSummary, suggestion, displayedCognitiveSummary.text]);
+
+
+    const handleExportCSV = useCallback(() => {
+        if (data.length === 0) {
+            alert("No data to export.");
+            return;
+        }
+
+        const headers = ["Time", "Attention", "Stress", "Curiosity"];
+        const rows = data.map(point => 
+            [
+                new Date(point.time).toISOString(),
+                point.attention.toFixed(2),
+                point.stress.toFixed(2),
+                point.curiosity.toFixed(2)
+            ].join(',')
+        );
+
+        const csvContent = [headers.join(','), ...rows].join('\n');
+        
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", "neuro_lens_data.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }, [data]);
+
+    const isStressActive = notifications.some(n => n.type === 'stress');
+    const isAttentionActive = notifications.some(n => n.type === 'attention-drop' || n.type === 'low-attention');
+
+    return (
+        <div className="relative bg-gray-900/50 p-4 md:p-8 rounded-2xl border border-gray-800 shadow-2xl shadow-cyan-500/10">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
+                <div className="lg:col-span-1 flex flex-col gap-6">
+                    <div className="flex flex-col items-center justify-center bg-black rounded-lg overflow-hidden border border-gray-700 aspect-video lg:aspect-[4/3] relative">
+                        {cameraError ? (
+                            <div className="p-4 text-center text-red-400">
+                                <p className="font-semibold">Camera Error</p>
+                                <p className="text-sm">{cameraError}</p>
+                            </div>
+                        ) : (
+                            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover transform scale-x-[-1]"></video>
+                        )}
+                        <div className={`absolute inset-0 transition-all duration-500 pointer-events-none rounded-lg ${isAttentionActive ? 'backdrop-brightness-75 backdrop-blur-sm' : ''} ${isStressActive ? 'animate-pulse-red' : ''}`}></div>
+                        
+                         {/* On-Camera Notification Area */}
+                        <div className="absolute top-3 right-3 z-20 flex flex-col gap-3 w-72">
+                            {notifications.map((n) => {
+                                const isStress = n.type === 'stress';
+                                const isAttentionDrop = n.type === 'attention-drop';
+                                
+                                const iconColor = isStress ? 'text-red-400' : isAttentionDrop ? 'text-yellow-400' : n.type === 'low-attention' ? 'text-sky-400' : 'text-violet-400';
+                                const bgColor = getIntensityColor(n.type, n.intensity);
+
+                                return (
+                                <div key={n.id} className="bg-gray-800/80 backdrop-blur-sm border border-gray-700/80 rounded-lg shadow-lg p-3 animate-fade-in-right">
+                                    <div className="flex items-start gap-3">
+                                        <div className={`flex-shrink-0 mt-1 ${iconColor}`}>
+                                            {isStress || isAttentionDrop ? <ExclamationIcon /> : <BellIcon />}
+                                        </div>
+                                        <div className="flex-grow">
+                                            <p className="font-semibold text-gray-200">{n.title}</p>
+                                            <p className="text-sm text-gray-400">{n.message}</p>
+                                        </div>
+                                        <button onClick={() => handleDismissNotification(n.id)} className="p-1 -m-1 text-gray-500 hover:text-gray-200 transition-colors">
+                                            <XIcon />
+                                        </button>
+                                    </div>
+                                    <div className="mt-2" title={`Intensity: ${(n.intensity * 100).toFixed(0)}%`}>
+                                        <div className="w-full bg-gray-600/50 rounded-full h-1.5 overflow-hidden">
+                                            <div 
+                                                className={`h-1.5 rounded-full transition-all duration-300 ${bgColor}`}
+                                                style={{ width: `${n.intensity * 100}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )})}
+                        </div>
+
+                        <div className="absolute bottom-2 left-2 bg-red-600 text-white px-2 py-0.5 rounded-md text-sm font-bold flex items-center gap-1.5">
+                            <span className="relative flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                            </span>
+                            LIVE
+                        </div>
+                    </div>
+                    <div className="bg-gray-800/50 p-4 rounded-lg border border-gray-700">
+                        <h4 className="text-sm font-medium text-gray-400 mb-2 uppercase tracking-wider text-center lg:text-left">Current Cognitive State</h4>
+                        <div className={`flex items-center justify-center lg:justify-start gap-3 transition-opacity duration-200 ${isFading ? 'opacity-0' : 'opacity-100'}`}>
+                            <span className={`w-3 h-3 rounded-full transition-colors duration-500 ${displayedCognitiveSummary.color.replace('text-', 'bg-')}`}></span>
+                            <p className={`text-xl font-bold transition-colors duration-500 ${displayedCognitiveSummary.color}`}>{displayedCognitiveSummary.text}</p>
+                        </div>
+                    </div>
+                     <div className="bg-gray-800/50 p-4 rounded-lg border border-gray-700">
+                        <div className="flex items-center gap-3 mb-2">
+                            <LightBulbIcon />
+                            <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider">Personalized Suggestion</h4>
+                        </div>
+                        <p className={`text-gray-300 transition-opacity duration-200 ${isFading ? 'opacity-0' : 'opacity-100'}`}>{displayedSuggestion}</p>
+                    </div>
+                </div>
+
+                <div className="lg:col-span-2 grid grid-cols-1 gap-6 md:gap-8">
+                    <CognitiveChart data={data} dataKey="attention" color="#22d3ee" name="Attention" />
+                    <CognitiveChart data={data} dataKey="stress" color="#f43f5e" name="Stress" />
+                    <CognitiveChart data={data} dataKey="curiosity" color="#a78bfa" name="Curiosity" />
+                </div>
+            </div>
+
+            <div className="mt-8 border-t border-gray-800 pt-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                     <div>
+                         <p className="text-gray-500 text-sm italic">
+                            Move your mouse or click to simulate interaction and see its effect on the cognitive model.
+                         </p>
+                    </div>
+                    <div className="flex flex-col md:items-end gap-3">
+                        <button 
+                            onClick={handleExportCSV}
+                            className="w-full md:w-auto flex items-center justify-center px-4 py-2 bg-gray-700/80 text-gray-300 rounded-md hover:bg-gray-600/80 transition-colors text-sm font-medium border border-gray-600"
+                            aria-label="Export cognitive data to CSV"
+                            disabled={data.length === 0}
+                        >
+                            <DownloadIcon />
+                            Export CSV
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default Dashboard;
