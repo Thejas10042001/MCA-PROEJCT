@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Brush } from 'recharts';
 import type { CognitiveDataPoint, Notification } from '../types';
 import { DownloadIcon } from './icons/DownloadIcon';
@@ -7,8 +7,13 @@ import { XIcon } from './icons/XIcon';
 import { CognitiveModel } from './cognitiveModel';
 import { LightBulbIcon } from './icons/LightBulbIcon';
 import { BellIcon } from './icons/BellIcon';
+import { HistoryIcon } from './icons/HistoryIcon';
+import { ZapIcon } from './icons/ZapIcon';
 
 const MAX_DATA_POINTS = 30;
+const MAX_HISTORY_POINTS = 5000;
+const STORAGE_KEY = 'neuroLensHistory';
+
 const HIGH_STRESS_THRESHOLD = 85;
 const STRESS_ALERT_DURATION_COUNT = 3; // Number of consecutive data points to trigger alert
 const STRESS_SPIKE_THRESHOLD = 30; // Increase over the window
@@ -74,8 +79,31 @@ const getPersonalizedSuggestion = (summaryText: string): string => {
     }
 }
 
+type TimeRange = 'live' | 'hour' | 'day' | 'week';
 
-const CognitiveChart: React.FC<{ data: CognitiveDataPoint[], dataKey: keyof CognitiveDataPoint, color: string, name: string }> = ({ data, dataKey, color, name }) => (
+interface CognitiveChartProps {
+    data: CognitiveDataPoint[];
+    dataKey: keyof CognitiveDataPoint;
+    color: string;
+    name: string;
+    timeRange: TimeRange;
+}
+
+const CognitiveChart: React.FC<CognitiveChartProps> = ({ data, dataKey, color, name, timeRange }) => {
+     const brushTickFormatter = (unixTime: number) => {
+        const date = new Date(unixTime);
+        switch (timeRange) {
+            case 'week':
+                return date.toLocaleDateString('default', { month: 'short', day: 'numeric' });
+            case 'day':
+                return date.toLocaleTimeString([], { hour: 'numeric', hour12: true });
+            case 'hour':
+            case 'live':
+            default:
+                return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+        }
+    };
+    return (
     <div className="w-full h-56 md:h-64">
         <h3 className="text-lg font-semibold mb-2 text-center text-gray-300">{name}</h3>
         <ResponsiveContainer width="100%" height="100%">
@@ -89,7 +117,7 @@ const CognitiveChart: React.FC<{ data: CognitiveDataPoint[], dataKey: keyof Cogn
                         borderColor: '#4A5568',
                         color: '#E2E8F0',
                     }}
-                    labelFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                    labelFormatter={(unixTime) => new Date(unixTime).toLocaleString([], { dateStyle: 'short', timeStyle: 'medium' })}
                     formatter={(value: number) => value.toFixed(1)}
                 />
                  <Legend verticalAlign="top" height={36}/>
@@ -100,7 +128,7 @@ const CognitiveChart: React.FC<{ data: CognitiveDataPoint[], dataKey: keyof Cogn
                     stroke={color} 
                     fill="rgba(100, 116, 139, 0.2)" 
                     travellerWidth={10}
-                    tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                    tickFormatter={brushTickFormatter}
                 >
                     <LineChart>
                         <Line type="monotone" dataKey={dataKey} stroke={color} dot={false} />
@@ -109,7 +137,7 @@ const CognitiveChart: React.FC<{ data: CognitiveDataPoint[], dataKey: keyof Cogn
             </LineChart>
         </ResponsiveContainer>
     </div>
-);
+)};
 
 const getIntensityColor = (type: Notification['type'], intensity: number): string => {
     if (type === 'stress') {
@@ -131,19 +159,17 @@ const getIntensityColor = (type: Notification['type'], intensity: number): strin
 };
 
 const Dashboard: React.FC = () => {
-    const [data, setData] = useState<CognitiveDataPoint[]>([]);
+    const [data, setData] = useState<CognitiveDataPoint[]>([]); // For live view
+    const [allData, setAllData] = useState<CognitiveDataPoint[]>([]); // For historical view
+    const [timeRange, setTimeRange] = useState<TimeRange>('live');
     const [cameraError, setCameraError] = useState<string | null>(null);
-    
-    // State for the actual cognitive values
     const [cognitiveSummary, setCognitiveSummary] = useState<SummaryState>({ text: 'Analyzing...', color: 'text-gray-400' });
     const [suggestion, setSuggestion] = useState<string>('');
-    
-    // State for what is displayed, to allow for transitions
     const [displayedCognitiveSummary, setDisplayedCognitiveSummary] = useState(cognitiveSummary);
     const [displayedSuggestion, setDisplayedSuggestion] = useState(suggestion);
     const [isFading, setIsFading] = useState(false);
-
     const [notifications, setNotifications] = useState<Notification[]>([]);
+    
     const videoRef = useRef<HTMLVideoElement>(null);
     const lastInteractionTimeRef = useRef<number>(Date.now());
     const highStressCounter = useRef(0);
@@ -174,17 +200,23 @@ const Dashboard: React.FC = () => {
     }, []);
     
     useEffect(() => {
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        if (storedData) {
+            try {
+                const parsedData = JSON.parse(storedData) as CognitiveDataPoint[];
+                setAllData(parsedData);
+            } catch (e) {
+                console.error("Failed to parse historical data", e);
+                localStorage.removeItem(STORAGE_KEY);
+            }
+        }
         initializeCamera();
     }, [initializeCamera]);
 
     useEffect(() => {
-        const handleInteraction = () => {
-          lastInteractionTimeRef.current = Date.now();
-        };
-    
+        const handleInteraction = () => { lastInteractionTimeRef.current = Date.now(); };
         window.addEventListener('mousemove', handleInteraction);
         window.addEventListener('click', handleInteraction);
-    
         return () => {
           window.removeEventListener('mousemove', handleInteraction);
           window.removeEventListener('click', handleInteraction);
@@ -217,150 +249,90 @@ const Dashboard: React.FC = () => {
             if (valenceRoll < 0.05) simulatedValence = 'negative';
             else if (valenceRoll < 0.1) simulatedValence = 'positive';
 
-            const newPoint = modelRef.current.update({
-                interactionLevel,
-                simulatedGazeFocus,
-                simulatedValence,
-            });
-
+            const newPoint = modelRef.current.update({ interactionLevel, simulatedGazeFocus, simulatedValence });
+            
+            // Update live data state
             setData(currentData => {
-                const newSummary = getCognitiveSummary(newPoint);
-                setCognitiveSummary(newSummary);
-                
-                // --- Stress Logic ---
-                const stressHistory = stressHistoryRef.current;
-                stressHistory.push(newPoint.stress);
-                if (stressHistory.length > STRESS_SPIKE_WINDOW) {
-                    stressHistory.shift();
-                }
-
-                if (newPoint.stress < STRESS_RECOVERY_THRESHOLD && highStressAlertActive.current) {
-                    setNotifications(curr => curr.filter(n => n.type !== 'stress'));
-                    highStressAlertActive.current = false;
-                    highStressCounter.current = 0;
-                }
-
-                if (stressHistory.length === STRESS_SPIKE_WINDOW && !highStressAlertActive.current) {
-                    const stressIncrease = newPoint.stress - stressHistory[0];
-                    if (stressIncrease >= STRESS_SPIKE_THRESHOLD) {
-                        const intensity = Math.max(0, Math.min(1, (stressIncrease - STRESS_SPIKE_THRESHOLD) / STRESS_SPIKE_THRESHOLD));
-                        addNotification({
-                            type: 'stress',
-                            title: 'Rapid Stress Spike',
-                            message: 'A sudden increase in stress was detected.',
-                            intensity: intensity,
-                        });
-                        highStressAlertActive.current = true;
-                        highStressCounter.current = 0;
-                    }
-                }
-                
-                if (newPoint.stress > HIGH_STRESS_THRESHOLD) {
-                    highStressCounter.current += 1;
-                } else {
-                    highStressCounter.current = 0;
-                }
-
-                if (highStressCounter.current >= STRESS_ALERT_DURATION_COUNT && !highStressAlertActive.current) {
-                    const intensity = Math.max(0, Math.min(1, (newPoint.stress - HIGH_STRESS_THRESHOLD) / (100 - HIGH_STRESS_THRESHOLD)));
-                    addNotification({
-                        type: 'stress',
-                        title: 'High Stress Detected',
-                        message: 'Consider taking a short break to refocus.',
-                        intensity: intensity,
-                    });
-                    highStressAlertActive.current = true;
-                }
-
-                // --- Attention Logic ---
-                const attentionHistory = attentionHistoryRef.current;
-                
-                // Recovery from Attention Drop
-                if (attentionDropAlertActive.current) {
-                    const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
-                    if (newPoint.attention > averageAttention - (ATTENTION_DROP_THRESHOLD * ATTENTION_RECOVERY_FACTOR)) {
-                       setNotifications(curr => curr.filter(n => n.type !== 'attention-drop'));
-                       attentionDropAlertActive.current = false;
-                    }
-                }
-
-                // Attention Drop Detection
-                if (attentionHistory.length >= RECENT_ATTENTION_WINDOW && !attentionDropAlertActive.current) {
-                    const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
-                    const attentionDrop = averageAttention - newPoint.attention;
-                    if (attentionDrop > ATTENTION_DROP_THRESHOLD) {
-                        const intensity = Math.max(0, Math.min(1, (attentionDrop - ATTENTION_DROP_THRESHOLD) / (100 - ATTENTION_DROP_THRESHOLD)));
-                        addNotification({
-                            type: 'attention-drop',
-                            title: 'Sudden Drop in Attention',
-                            message: 'A significant distraction may have occurred.',
-                            intensity: intensity,
-                        });
-                        attentionDropAlertActive.current = true;
-                    }
-                }
-
-                // Recovery from Low Attention
-                if (newPoint.attention > LOW_ATTENTION_RECOVERY_THRESHOLD && lowAttentionAlertActive.current) {
-                    setNotifications(curr => curr.filter(n => n.type !== 'low-attention'));
-                    lowAttentionAlertActive.current = false;
-                    lowAttentionCounter.current = 0;
-                }
-
-                // Sustained Low Attention Detection
-                if (newPoint.attention < LOW_ATTENTION_THRESHOLD) {
-                    lowAttentionCounter.current += 1;
-                } else {
-                    lowAttentionCounter.current = 0;
-                }
-                
-                if (lowAttentionCounter.current >= LOW_ATTENTION_DURATION_COUNT && !lowAttentionAlertActive.current) {
-                    const intensity = Math.max(0, Math.min(1, (LOW_ATTENTION_THRESHOLD - newPoint.attention) / LOW_ATTENTION_THRESHOLD));
-                     addNotification({
-                        type: 'low-attention',
-                        title: 'Low Attention Span',
-                        message: 'Focus appears to be consistently low.',
-                        intensity: intensity,
-                    });
-                    lowAttentionAlertActive.current = true;
-                }
-
-                // --- Curiosity Logic ---
-                if (newPoint.curiosity > LOW_CURIOSITY_RECOVERY_THRESHOLD && lowCuriosityAlertActive.current) {
-                    setNotifications(curr => curr.filter(n => n.type !== 'low-curiosity'));
-                    lowCuriosityAlertActive.current = false;
-                    lowCuriosityCounter.current = 0;
-                }
-
-                if (newPoint.curiosity < LOW_CURIOSITY_THRESHOLD) {
-                    lowCuriosityCounter.current += 1;
-                } else {
-                    lowCuriosityCounter.current = 0;
-                }
-
-                if (lowCuriosityCounter.current >= LOW_CURIOSITY_DURATION_COUNT && !lowCuriosityAlertActive.current) {
-                    const intensity = Math.max(0, Math.min(1, (LOW_CURIOSITY_THRESHOLD - newPoint.curiosity) / LOW_CURIOSITY_THRESHOLD));
-                     addNotification({
-                        type: 'low-curiosity',
-                        title: 'Low Curiosity',
-                        message: 'Interest appears to be waning. A new topic might help.',
-                        intensity: intensity,
-                    });
-                    lowCuriosityAlertActive.current = true;
-                }
-
-                // Update history
-                attentionHistoryRef.current.push(newPoint.attention);
-                if (attentionHistoryRef.current.length > RECENT_ATTENTION_WINDOW) {
-                    attentionHistoryRef.current.shift();
-                }
-                
                 const newData = [...currentData, newPoint];
-                if (newData.length > MAX_DATA_POINTS) {
-                    return newData.slice(newData.length - MAX_DATA_POINTS);
-                }
-                return newData;
+                return newData.length > MAX_DATA_POINTS ? newData.slice(-MAX_DATA_POINTS) : newData;
             });
+
+            // Update and persist historical data
+            setAllData(currentAllData => {
+                const updatedHistory = [...currentAllData, newPoint];
+                const finalHistory = updatedHistory.length > MAX_HISTORY_POINTS ? updatedHistory.slice(-MAX_HISTORY_POINTS) : updatedHistory;
+                setTimeout(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(finalHistory)), 0);
+                return finalHistory;
+            });
+            
+            setCognitiveSummary(getCognitiveSummary(newPoint));
+            
+            const stressHistory = stressHistoryRef.current;
+            stressHistory.push(newPoint.stress);
+            if (stressHistory.length > STRESS_SPIKE_WINDOW) stressHistory.shift();
+            if (newPoint.stress < STRESS_RECOVERY_THRESHOLD && highStressAlertActive.current) {
+                setNotifications(curr => curr.filter(n => n.type !== 'stress'));
+                highStressAlertActive.current = false;
+                highStressCounter.current = 0;
+            }
+            if (stressHistory.length === STRESS_SPIKE_WINDOW && !highStressAlertActive.current) {
+                const stressIncrease = newPoint.stress - stressHistory[0];
+                if (stressIncrease >= STRESS_SPIKE_THRESHOLD) {
+                    addNotification({ type: 'stress', title: 'Rapid Stress Spike', message: 'A sudden increase in stress was detected.', intensity: Math.max(0, Math.min(1, (stressIncrease - STRESS_SPIKE_THRESHOLD) / STRESS_SPIKE_THRESHOLD)) });
+                    highStressAlertActive.current = true;
+                    highStressCounter.current = 0;
+                }
+            }
+            if (newPoint.stress > HIGH_STRESS_THRESHOLD) highStressCounter.current += 1;
+            else highStressCounter.current = 0;
+            if (highStressCounter.current >= STRESS_ALERT_DURATION_COUNT && !highStressAlertActive.current) {
+                addNotification({ type: 'stress', title: 'High Stress Detected', message: 'Consider taking a short break to refocus.', intensity: Math.max(0, Math.min(1, (newPoint.stress - HIGH_STRESS_THRESHOLD) / (100 - HIGH_STRESS_THRESHOLD))) });
+                highStressAlertActive.current = true;
+            }
+
+            const attentionHistory = attentionHistoryRef.current;
+            if (attentionDropAlertActive.current) {
+                const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
+                if (newPoint.attention > averageAttention - (ATTENTION_DROP_THRESHOLD * ATTENTION_RECOVERY_FACTOR)) {
+                   setNotifications(curr => curr.filter(n => n.type !== 'attention-drop'));
+                   attentionDropAlertActive.current = false;
+                }
+            }
+            if (attentionHistory.length >= RECENT_ATTENTION_WINDOW && !attentionDropAlertActive.current) {
+                const averageAttention = attentionHistory.reduce((a, b) => a + b, 0) / attentionHistory.length;
+                const attentionDrop = averageAttention - newPoint.attention;
+                if (attentionDrop > ATTENTION_DROP_THRESHOLD) {
+                    addNotification({ type: 'attention-drop', title: 'Sudden Drop in Attention', message: 'A significant distraction may have occurred.', intensity: Math.max(0, Math.min(1, (attentionDrop - ATTENTION_DROP_THRESHOLD) / (100 - ATTENTION_DROP_THRESHOLD))) });
+                    attentionDropAlertActive.current = true;
+                }
+            }
+            if (newPoint.attention > LOW_ATTENTION_RECOVERY_THRESHOLD && lowAttentionAlertActive.current) {
+                setNotifications(curr => curr.filter(n => n.type !== 'low-attention'));
+                lowAttentionAlertActive.current = false;
+                lowAttentionCounter.current = 0;
+            }
+            if (newPoint.attention < LOW_ATTENTION_THRESHOLD) lowAttentionCounter.current += 1;
+            else lowAttentionCounter.current = 0;
+            if (lowAttentionCounter.current >= LOW_ATTENTION_DURATION_COUNT && !lowAttentionAlertActive.current) {
+                 addNotification({ type: 'low-attention', title: 'Low Attention Span', message: 'Focus appears to be consistently low.', intensity: Math.max(0, Math.min(1, (LOW_ATTENTION_THRESHOLD - newPoint.attention) / LOW_ATTENTION_THRESHOLD)) });
+                lowAttentionAlertActive.current = true;
+            }
+
+            if (newPoint.curiosity > LOW_CURIOSITY_RECOVERY_THRESHOLD && lowCuriosityAlertActive.current) {
+                setNotifications(curr => curr.filter(n => n.type !== 'low-curiosity'));
+                lowCuriosityAlertActive.current = false;
+                lowCuriosityCounter.current = 0;
+            }
+            if (newPoint.curiosity < LOW_CURIOSITY_THRESHOLD) lowCuriosityCounter.current += 1;
+            else lowCuriosityCounter.current = 0;
+            if (lowCuriosityCounter.current >= LOW_CURIOSITY_DURATION_COUNT && !lowCuriosityAlertActive.current) {
+                 addNotification({ type: 'low-curiosity', title: 'Low Curiosity', message: 'Interest appears to be waning. A new topic might help.', intensity: Math.max(0, Math.min(1, (LOW_CURIOSITY_THRESHOLD - newPoint.curiosity) / LOW_CURIOSITY_THRESHOLD)) });
+                lowCuriosityAlertActive.current = true;
+            }
+
+            attentionHistoryRef.current.push(newPoint.attention);
+            if (attentionHistoryRef.current.length > RECENT_ATTENTION_WINDOW) attentionHistoryRef.current.shift();
+            
         }, 1500);
 
         return () => clearInterval(interval);
@@ -382,44 +354,92 @@ const Dashboard: React.FC = () => {
         }
     }, [cognitiveSummary, suggestion, displayedCognitiveSummary.text]);
 
+    const chartData = useMemo(() => {
+        if (timeRange === 'live') {
+            return data;
+        }
+        const now = Date.now();
+        let startTime = now;
+        if (timeRange === 'hour') startTime -= 60 * 60 * 1000;
+        if (timeRange === 'day') startTime -= 24 * 60 * 60 * 1000;
+        if (timeRange === 'week') startTime -= 7 * 24 * 60 * 60 * 1000;
+
+        return allData.filter(p => p.time >= startTime);
+    }, [timeRange, data, allData]);
+
+     const historicalInsights = useMemo(() => {
+        if (timeRange === 'live' || chartData.length < 2) {
+            return null;
+        }
+        const avg = (key: keyof Omit<CognitiveDataPoint, 'time'>) => chartData.reduce((acc, p) => acc + (p[key] as number), 0) / chartData.length;
+        const avgAttention = avg('attention');
+        const avgStress = avg('stress');
+        const avgCuriosity = avg('curiosity');
+        const highStressEvents = chartData.filter(p => p.stress > HIGH_STRESS_THRESHOLD).length;
+        const flowStatePeriods = chartData.filter(p => getCognitiveSummary(p).text === "Flow State").length;
+        let insightText = `Your average attention was ${avgAttention.toFixed(1)}%.`;
+        if (highStressEvents / chartData.length > 0.1) insightText += ` There were several instances of high stress.`;
+        else if (flowStatePeriods / chartData.length > 0.2) insightText += ` You spent a significant amount of time in a "flow state."`;
+        else insightText += ` Stress levels remained manageable.`;
+        return { avgAttention, avgStress, avgCuriosity, insightText };
+    }, [timeRange, chartData]);
+
+    const borderColorClass = useMemo(() => {
+        const colorMap: { [key: string]: string } = {
+            "text-amber-400": "border-amber-400/60",
+            "text-cyan-300": "border-cyan-300/60",
+            "text-violet-400": "border-violet-400/60",
+            "text-rose-500": "border-rose-500/60",
+            "text-yellow-500": "border-yellow-500/60",
+            "text-red-500": "border-red-500/60",
+            "text-purple-400": "border-purple-400/60",
+            "text-gray-300": "border-gray-700",
+            "text-gray-400": "border-gray-700",
+        };
+        return colorMap[displayedCognitiveSummary.color] || 'border-gray-700';
+    }, [displayedCognitiveSummary.color]);
 
     const handleExportCSV = useCallback(() => {
-        if (data.length === 0) {
+        if (chartData.length === 0) {
             alert("No data to export.");
             return;
         }
-
         const headers = ["Time", "Attention", "Stress", "Curiosity"];
-        const rows = data.map(point => 
-            [
-                new Date(point.time).toISOString(),
-                point.attention.toFixed(2),
-                point.stress.toFixed(2),
-                point.curiosity.toFixed(2)
-            ].join(',')
-        );
-
+        const rows = chartData.map(point => [ new Date(point.time).toISOString(), point.attention.toFixed(2), point.stress.toFixed(2), point.curiosity.toFixed(2) ].join(','));
         const csvContent = [headers.join(','), ...rows].join('\n');
-        
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.setAttribute("href", url);
-        link.setAttribute("download", "neuro_lens_data.csv");
+        link.setAttribute("download", `neuro_lens_data_${timeRange}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
-    }, [data]);
+    }, [chartData, timeRange]);
 
     const isStressActive = notifications.some(n => n.type === 'stress');
     const isAttentionActive = notifications.some(n => n.type === 'attention-drop' || n.type === 'low-attention');
 
+    const TimeRangeButton: React.FC<{label: string, value: TimeRange, icon: React.ReactNode}> = ({label, value, icon}) => (
+        <button onClick={() => setTimeRange(value)} className={`px-3 py-1.5 md:px-4 md:py-2 text-sm font-semibold rounded-md flex items-center transition-colors ${timeRange === value ? 'bg-cyan-500/20 text-cyan-300' : 'text-gray-400 hover:bg-gray-700/50'}`}>
+            {icon}
+            {label}
+        </button>
+    );
+
     return (
         <div className="relative bg-gray-900/50 p-4 md:p-8 rounded-2xl border border-gray-800 shadow-2xl shadow-cyan-500/10">
+            <div className="flex flex-wrap justify-center gap-2 mb-8">
+                <TimeRangeButton label="Live" value="live" icon={<ZapIcon />} />
+                <TimeRangeButton label="Last Hour" value="hour" icon={<HistoryIcon />} />
+                <TimeRangeButton label="Last 24H" value="day" icon={<HistoryIcon />} />
+                <TimeRangeButton label="Last 7D" value="week" icon={<HistoryIcon />} />
+            </div>
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-8">
                 <div className="lg:col-span-1 flex flex-col gap-6">
-                    <div className="flex flex-col items-center justify-center bg-black rounded-lg overflow-hidden border border-gray-700 aspect-video lg:aspect-[4/3] relative">
+                    <div className={`flex flex-col items-center justify-center bg-black rounded-lg overflow-hidden border-2 aspect-video lg:aspect-[4/3] relative transition-colors duration-500 ${borderColorClass}`}>
                         {cameraError ? (
                             <div className="p-4 text-center text-red-400">
                                 <p className="font-semibold">Camera Error</p>
@@ -430,48 +450,40 @@ const Dashboard: React.FC = () => {
                         )}
                         <div className={`absolute inset-0 transition-all duration-500 pointer-events-none rounded-lg ${isAttentionActive ? 'backdrop-brightness-75 backdrop-blur-sm' : ''} ${isStressActive ? 'animate-pulse-red' : ''}`}></div>
                         
-                         {/* On-Camera Notification Area */}
                         <div className="absolute top-3 right-3 z-20 flex flex-col gap-3 w-72">
                             {notifications.map((n) => {
                                 const isStress = n.type === 'stress';
                                 const isAttentionDrop = n.type === 'attention-drop';
-                                
                                 const iconColor = isStress ? 'text-red-400' : isAttentionDrop ? 'text-yellow-400' : n.type === 'low-attention' ? 'text-sky-400' : 'text-violet-400';
                                 const bgColor = getIntensityColor(n.type, n.intensity);
 
                                 return (
                                 <div key={n.id} className="bg-gray-800/80 backdrop-blur-sm border border-gray-700/80 rounded-lg shadow-lg p-3 animate-fade-in-right">
                                     <div className="flex items-start gap-3">
-                                        <div className={`flex-shrink-0 mt-1 ${iconColor}`}>
-                                            {isStress || isAttentionDrop ? <ExclamationIcon /> : <BellIcon />}
-                                        </div>
+                                        <div className={`flex-shrink-0 mt-1 ${iconColor}`}>{isStress || isAttentionDrop ? <ExclamationIcon /> : <BellIcon />}</div>
                                         <div className="flex-grow">
                                             <p className="font-semibold text-gray-200">{n.title}</p>
                                             <p className="text-sm text-gray-400">{n.message}</p>
                                         </div>
-                                        <button onClick={() => handleDismissNotification(n.id)} className="p-1 -m-1 text-gray-500 hover:text-gray-200 transition-colors">
-                                            <XIcon />
-                                        </button>
+                                        <button onClick={() => handleDismissNotification(n.id)} className="p-1 -m-1 text-gray-500 hover:text-gray-200 transition-colors"><XIcon /></button>
                                     </div>
                                     <div className="mt-2" title={`Intensity: ${(n.intensity * 100).toFixed(0)}%`}>
                                         <div className="w-full bg-gray-600/50 rounded-full h-1.5 overflow-hidden">
-                                            <div 
-                                                className={`h-1.5 rounded-full transition-all duration-300 ${bgColor}`}
-                                                style={{ width: `${n.intensity * 100}%` }}
-                                            ></div>
+                                            <div className={`h-1.5 rounded-full transition-all duration-300 ${bgColor}`} style={{ width: `${n.intensity * 100}%` }}></div>
                                         </div>
                                     </div>
                                 </div>
                             )})}
                         </div>
-
-                        <div className="absolute bottom-2 left-2 bg-red-600 text-white px-2 py-0.5 rounded-md text-sm font-bold flex items-center gap-1.5">
-                            <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                            </span>
-                            LIVE
-                        </div>
+                        {timeRange === 'live' && (
+                            <div className="absolute bottom-2 left-2 bg-red-600 text-white px-2 py-0.5 rounded-md text-sm font-bold flex items-center gap-1.5">
+                                <span className="relative flex h-2 w-2">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                                </span>
+                                LIVE
+                            </div>
+                        )}
                     </div>
                     <div className="bg-gray-800/50 p-4 rounded-lg border border-gray-700">
                         <h4 className="text-sm font-medium text-gray-400 mb-2 uppercase tracking-wider text-center lg:text-left">Current Cognitive State</h4>
@@ -490,11 +502,35 @@ const Dashboard: React.FC = () => {
                 </div>
 
                 <div className="lg:col-span-2 grid grid-cols-1 gap-6 md:gap-8">
-                    <CognitiveChart data={data} dataKey="attention" color="#22d3ee" name="Attention" />
-                    <CognitiveChart data={data} dataKey="stress" color="#f43f5e" name="Stress" />
-                    <CognitiveChart data={data} dataKey="curiosity" color="#a78bfa" name="Curiosity" />
+                    <CognitiveChart data={chartData} dataKey="attention" color="#22d3ee" name="Attention" timeRange={timeRange} />
+                    <CognitiveChart data={chartData} dataKey="stress" color="#f43f5e" name="Stress" timeRange={timeRange} />
+                    <CognitiveChart data={chartData} dataKey="curiosity" color="#a78bfa" name="Curiosity" timeRange={timeRange} />
                 </div>
             </div>
+
+            {historicalInsights && timeRange !== 'live' && (
+                <div className="mt-8 border-t border-gray-800 pt-6 animate-fade-in-right">
+                    <h3 className="text-xl font-bold text-center mb-4 text-white">Historical Summary ({timeRange === 'hour' ? 'Last Hour' : timeRange === 'day' ? 'Last 24 Hours' : 'Last 7 Days'})</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+                         <div className="bg-gray-800 p-4 rounded-lg border border-gray-700/50">
+                            <p className="text-sm text-gray-400">Avg. Attention</p>
+                            <p className="text-2xl font-bold text-cyan-400">{historicalInsights.avgAttention.toFixed(1)}%</p>
+                        </div>
+                        <div className="bg-gray-800 p-4 rounded-lg border border-gray-700/50">
+                            <p className="text-sm text-gray-400">Avg. Stress</p>
+                            <p className="text-2xl font-bold text-rose-400">{historicalInsights.avgStress.toFixed(1)}%</p>
+                        </div>
+                        <div className="bg-gray-800 p-4 rounded-lg border border-gray-700/50">
+                            <p className="text-sm text-gray-400">Avg. Curiosity</p>
+                            <p className="text-2xl font-bold text-violet-400">{historicalInsights.avgCuriosity.toFixed(1)}%</p>
+                        </div>
+                    </div>
+                    <div className="mt-4 text-center bg-gray-800/50 p-3 rounded-lg border border-gray-700">
+                        <p className="text-gray-300 italic">{historicalInsights.insightText}</p>
+                    </div>
+                </div>
+            )}
+
 
             <div className="mt-8 border-t border-gray-800 pt-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
@@ -506,9 +542,9 @@ const Dashboard: React.FC = () => {
                     <div className="flex flex-col md:items-end gap-3">
                         <button 
                             onClick={handleExportCSV}
-                            className="w-full md:w-auto flex items-center justify-center px-4 py-2 bg-gray-700/80 text-gray-300 rounded-md hover:bg-gray-600/80 transition-colors text-sm font-medium border border-gray-600"
+                            className="w-full md:w-auto flex items-center justify-center px-4 py-2 bg-gray-700/80 text-gray-300 rounded-md hover:bg-gray-600/80 transition-colors text-sm font-medium border border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
                             aria-label="Export cognitive data to CSV"
-                            disabled={data.length === 0}
+                            disabled={chartData.length === 0}
                         >
                             <DownloadIcon />
                             Export CSV
