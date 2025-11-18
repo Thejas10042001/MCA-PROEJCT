@@ -15,9 +15,9 @@ const MAX_HISTORY_POINTS = 5000;
 const STORAGE_KEY = 'neuroLensHistory';
 
 const HIGH_STRESS_THRESHOLD = 85;
-const STRESS_ALERT_DURATION_COUNT = 3; // Number of consecutive data points to trigger alert
+const STRESS_ALERT_DURATION_COUNT = 4; // Approx 6 seconds (4 * 1.5s interval)
 const STRESS_SPIKE_THRESHOLD = 30; // Increase over the window
-const STRESS_SPIKE_WINDOW = 3; // Number of data points for spike detection
+const STRESS_SPIKE_WINDOW = 7; // Approx 10.5 seconds (7 * 1.5s interval)
 const STRESS_RECOVERY_THRESHOLD = 70; // Stress must drop below this to clear an alert
 const ATTENTION_DROP_THRESHOLD = 35; // Drop from recent average
 const RECENT_ATTENTION_WINDOW = 5; // Number of data points for average
@@ -158,6 +158,52 @@ const getIntensityColor = (type: Notification['type'], intensity: number): strin
     return 'bg-gray-500';
 };
 
+interface CognitiveGaugeProps {
+    value: number;
+    label: string;
+    colorClassName: string;
+}
+
+const CognitiveGauge: React.FC<CognitiveGaugeProps> = ({ value, label, colorClassName }) => {
+    const radius = 42;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference - (value / 100) * circumference;
+
+    return (
+        <div className="relative w-28 h-28">
+            <svg className="w-full h-full" viewBox="0 0 100 100">
+                <circle
+                    className="text-gray-700"
+                    strokeWidth="8"
+                    stroke="currentColor"
+                    fill="transparent"
+                    r={radius}
+                    cx="50"
+                    cy="50"
+                />
+                <circle
+                    className={`${colorClassName} transition-all duration-300 ease-in-out`}
+                    strokeWidth="8"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={offset}
+                    strokeLinecap="round"
+                    stroke="currentColor"
+                    fill="transparent"
+                    r={radius}
+                    cx="50"
+                    cy="50"
+                    transform="rotate(-90 50 50)"
+                />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className="text-2xl font-bold text-white">{Math.round(value)}</span>
+                <span className="text-xs text-gray-400">{label}</span>
+            </div>
+        </div>
+    );
+};
+
+
 const Dashboard: React.FC = () => {
     const [data, setData] = useState<CognitiveDataPoint[]>([]); // For live view
     const [allData, setAllData] = useState<CognitiveDataPoint[]>([]); // For historical view
@@ -182,6 +228,48 @@ const Dashboard: React.FC = () => {
     const modelRef = useRef(new CognitiveModel());
     const attentionHistoryRef = useRef<number[]>([]);
     const stressHistoryRef = useRef<number[]>([]);
+    const audioContextRef = useRef<AudioContext | null>(null);
+
+    const playAlertSound = useCallback((type: 'stress' | 'attention') => {
+        if (!audioContextRef.current) {
+            try {
+                audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+            } catch (e) {
+                console.error("Web Audio API is not supported in this browser.");
+                return;
+            }
+        }
+        const audioCtx = audioContextRef.current;
+        if (!audioCtx) return;
+
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        
+        if (type === 'stress') {
+            // A more urgent, descending square wave for stress
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(660, audioCtx.currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(330, audioCtx.currentTime + 0.2);
+            gainNode.gain.setValueAtTime(0.25, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+        } else { // 'attention'
+            // A softer, higher-pitched sine wave for attention drops
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+        }
+
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + 0.3);
+    }, []);
 
     const initializeCamera = useCallback(async () => {
         try {
@@ -251,13 +339,11 @@ const Dashboard: React.FC = () => {
 
             const newPoint = modelRef.current.update({ interactionLevel, simulatedGazeFocus, simulatedValence });
             
-            // Update live data state
             setData(currentData => {
                 const newData = [...currentData, newPoint];
                 return newData.length > MAX_DATA_POINTS ? newData.slice(-MAX_DATA_POINTS) : newData;
             });
 
-            // Update and persist historical data
             setAllData(currentAllData => {
                 const updatedHistory = [...currentAllData, newPoint];
                 const finalHistory = updatedHistory.length > MAX_HISTORY_POINTS ? updatedHistory.slice(-MAX_HISTORY_POINTS) : updatedHistory;
@@ -279,6 +365,7 @@ const Dashboard: React.FC = () => {
                 const stressIncrease = newPoint.stress - stressHistory[0];
                 if (stressIncrease >= STRESS_SPIKE_THRESHOLD) {
                     addNotification({ type: 'stress', title: 'Rapid Stress Spike', message: 'A sudden increase in stress was detected.', intensity: Math.max(0, Math.min(1, (stressIncrease - STRESS_SPIKE_THRESHOLD) / STRESS_SPIKE_THRESHOLD)) });
+                    playAlertSound('stress');
                     highStressAlertActive.current = true;
                     highStressCounter.current = 0;
                 }
@@ -287,6 +374,7 @@ const Dashboard: React.FC = () => {
             else highStressCounter.current = 0;
             if (highStressCounter.current >= STRESS_ALERT_DURATION_COUNT && !highStressAlertActive.current) {
                 addNotification({ type: 'stress', title: 'High Stress Detected', message: 'Consider taking a short break to refocus.', intensity: Math.max(0, Math.min(1, (newPoint.stress - HIGH_STRESS_THRESHOLD) / (100 - HIGH_STRESS_THRESHOLD))) });
+                playAlertSound('stress');
                 highStressAlertActive.current = true;
             }
 
@@ -303,6 +391,7 @@ const Dashboard: React.FC = () => {
                 const attentionDrop = averageAttention - newPoint.attention;
                 if (attentionDrop > ATTENTION_DROP_THRESHOLD) {
                     addNotification({ type: 'attention-drop', title: 'Sudden Drop in Attention', message: 'A significant distraction may have occurred.', intensity: Math.max(0, Math.min(1, (attentionDrop - ATTENTION_DROP_THRESHOLD) / (100 - ATTENTION_DROP_THRESHOLD))) });
+                    playAlertSound('attention');
                     attentionDropAlertActive.current = true;
                 }
             }
@@ -336,7 +425,7 @@ const Dashboard: React.FC = () => {
         }, 1500);
 
         return () => clearInterval(interval);
-    }, [addNotification]);
+    }, [addNotification, playAlertSound]);
     
     useEffect(() => {
         setSuggestion(getPersonalizedSuggestion(cognitiveSummary.text));
@@ -404,8 +493,17 @@ const Dashboard: React.FC = () => {
             alert("No data to export.");
             return;
         }
+
+        const formatTimestamp = (unixTime: number): string => {
+            const date = new Date(unixTime);
+            const pad = (n: number) => n.toString().padStart(2, '0');
+            const dateString = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+            const timeString = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+            return `${dateString} ${timeString}`;
+        };
+
         const headers = ["Time", "Attention", "Stress", "Curiosity"];
-        const rows = chartData.map(point => [ new Date(point.time).toISOString(), point.attention.toFixed(2), point.stress.toFixed(2), point.curiosity.toFixed(2) ].join(','));
+        const rows = chartData.map(point => [ `"${formatTimestamp(point.time)}"`, point.attention.toFixed(2), point.stress.toFixed(2), point.curiosity.toFixed(2) ].join(','));
         const csvContent = [headers.join(','), ...rows].join('\n');
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
@@ -427,6 +525,12 @@ const Dashboard: React.FC = () => {
             {label}
         </button>
     );
+    
+    const latestDataPoint = data[data.length - 1];
+    const currentAttention = latestDataPoint ? latestDataPoint.attention : 0;
+    const currentStress = latestDataPoint ? latestDataPoint.stress : 0;
+    const currentCuriosity = latestDataPoint ? latestDataPoint.curiosity : 0;
+
 
     return (
         <div className="relative bg-gray-900/50 p-4 md:p-8 rounded-2xl border border-gray-800 shadow-2xl shadow-cyan-500/10">
@@ -486,10 +590,18 @@ const Dashboard: React.FC = () => {
                         )}
                     </div>
                     <div className="bg-gray-800/50 p-4 rounded-lg border border-gray-700">
-                        <h4 className="text-sm font-medium text-gray-400 mb-2 uppercase tracking-wider text-center lg:text-left">Current Cognitive State</h4>
-                        <div className={`flex items-center justify-center lg:justify-start gap-3 transition-opacity duration-200 ${isFading ? 'opacity-0' : 'opacity-100'}`}>
-                            <span className={`w-3 h-3 rounded-full transition-colors duration-500 ${displayedCognitiveSummary.color.replace('text-', 'bg-')}`}></span>
-                            <p className={`text-xl font-bold transition-colors duration-500 ${displayedCognitiveSummary.color}`}>{displayedCognitiveSummary.text}</p>
+                        <h4 className="text-sm font-medium text-gray-400 mb-4 uppercase tracking-wider text-center">Real-time Metrics</h4>
+                        <div className="flex justify-around items-center gap-2">
+                            <CognitiveGauge value={currentAttention} label="Attention" colorClassName="text-cyan-400" />
+                            <CognitiveGauge value={currentStress} label="Stress" colorClassName="text-rose-500" />
+                            <CognitiveGauge value={currentCuriosity} label="Curiosity" colorClassName="text-violet-400" />
+                        </div>
+                        <div className="mt-4">
+                            <h4 className="text-sm font-medium text-gray-400 mb-1 uppercase tracking-wider text-center">Current Cognitive State</h4>
+                            <div className={`flex items-center justify-center gap-3 transition-opacity duration-200 ${isFading ? 'opacity-0' : 'opacity-100'}`}>
+                                <span className={`w-3 h-3 rounded-full transition-colors duration-500 ${displayedCognitiveSummary.color.replace('text-', 'bg-')}`}></span>
+                                <p className={`text-xl font-bold transition-colors duration-500 ${displayedCognitiveSummary.color}`}>{displayedCognitiveSummary.text}</p>
+                            </div>
                         </div>
                     </div>
                      <div className="bg-gray-800/50 p-4 rounded-lg border border-gray-700">

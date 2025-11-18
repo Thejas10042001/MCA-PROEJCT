@@ -106,7 +106,7 @@ const App: React.FC = () => {
 
       {/* Footer */}
       <footer className="text-center py-8 border-t border-gray-800">
-        <p className="text-gray-500">&copy; {new Date().getFullYear()} NeuroLens AI. Pioneering the future of human-computer interaction.</p>
+        <p className="text-gray-500">Created by Thejas Sreenivasu | &copy; {new Date().getFullYear()} NeuroLens AI. Pioneering the future of human-computer interaction.</p>
       </footer>
     </div>
   );
